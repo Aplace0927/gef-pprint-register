@@ -30,6 +30,4 @@ Using larger bit type on smaller bit array might result in
 ### Floating points
 * `f32`, `f64` are available, as `float` and `double`
 ### Character and Strings
-* `c8`: ASCII / ISO 8859-1 (Latin-1) size, by byte.
-* `c16`: Encode into Unicode BMP (Basic Multilingual Plane): 0x0000 ~ 0xFFFF
-* `s`: Encode into unicode string.
+* `c`: ASCII / ISO 8859-1 (Latin-1) size, by byte.
