@@ -1,18 +1,11 @@
-from gef import *
-import gdb
-
-"""
-Available formats
-
-rez
-
-"""
+# from gef import *
+# import gdb
 
 
-class RegisterViewer(GenericCommand):
+class ExtendedRegisterCommand(GenericCommand):
     _cmdline_: str = "rezister"
     _syntax_: str = (
-        f"{_cmdline_} [[[Register][Bytes] [Format]] ... [[Register][Bytes] [Format]]]"
+        f"{_cmdline_} {{Register[Bytes]:{{Format}}}} ... {{Register[Bytes]:{{Format}}}}"
     )
     _example_: str = f"\n{_cmdline_}" f"\n{_cmdline_} "
 
@@ -31,10 +24,11 @@ class NewCommand(GenericCommand):
     @only_if_gdb_running  # not required, ensures that the debug session is started
     def do_invoke(self, argv):
         # let's say we want to print some info about the architecture of the current binary
-        print(f"gef.arch={type(gef.arch)}")
-        # or showing the current $pc
-        print(f"gef.arch.pc={gef.arch.pc:#x}")
+        cmdline = ("".join(argv)).split("$")
+        print(cmdline)
+        for idx, regs in enumerate(cmdline):
+            print(f"Parse #{idx}:\n{ast.dump(ast.parse(regs), indent=2)}")
         return
 
 
-register(NewCommand)
+register_external_command(ExtendedRegisterCommand())
