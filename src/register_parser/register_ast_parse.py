@@ -9,7 +9,6 @@ def do_preprocess(argv: list[str]) -> str:
     """
     return ("".join(argv)).split("$")
 
-
 class RegisterNotationASTVisitor(ast.NodeVisitor):
     __register_properties: RegisterViewProperties = {
         "view_slice": (None, None),
@@ -28,6 +27,10 @@ class RegisterNotationASTVisitor(ast.NodeVisitor):
         print(f"VIE_ENDI = {self.__register_properties['view_endianess']}")
         print(f"DCD_RADX = {self.__register_properties['decodetype_radix']}")
         print(f"DCD_UNIT = {self.__register_properties['decodetype_unit']}")
+
+    def do_parse(self, node: ast.Module) -> RegisterViewProperties:
+        self.visit_Module(node)
+        return self.__register_properties
 
     def visit_Module(self, node: ast.Module) -> Any:
         """
@@ -134,6 +137,13 @@ class RegisterNotationASTVisitor(ast.NodeVisitor):
             return None
         return node.value
 
+
+    @staticmethod
+    def parse_register_notation(regs: str) -> ast.Module:
+        """
+        Parse string into register notation AST.
+        """
+        return ast.parse(regs)
 
 TEST_STR = """
     $rdi
