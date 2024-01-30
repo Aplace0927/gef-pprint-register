@@ -1,6 +1,9 @@
 from typing import TypedDict
 from enum import Enum
 from typing import Any
+from itertools import product
+from functools import reduce
+from operator import or_
 import ast
 
 
@@ -36,6 +39,11 @@ def do_preprocess(argv: list[str]) -> str:
     Split queries by register delimiter.
     """
     return ("".join(argv)).split("$")
+
+
+def fold64(expand: list[int], ln: int) -> int:
+    expand = [int(expand[idx]) for idx in range(ln)]
+    return reduce(or_, [x << (idx * 64) for idx, x in enumerate(expand)])
 
 
 class RegisterNotationASTVisitor(ast.NodeVisitor):
@@ -180,7 +188,33 @@ class RegisterNotationASTVisitor(ast.NodeVisitor):
 
 class RegisterViewer:
     __register_properties: RegisterViewProperties
-    __frame: gdb.Frame = gdb.newest_frame()
+    __frame: gdb.Frame
+
+    def __fetch_bytes(self):
+        reg_name = self.__register_properties["reg_name"]
+        reg_bits = self.__register_properties["reg_bits"]
+        reg_raw = self.__frame.read_register(reg_name)
+        reg_val: int
+        match reg_bits:
+            case 512:
+                reg_val = fold64(reg_raw["v8_int64"], 512 // 64)
+            case 256:
+                reg_val = fold64(reg_raw["v4_int64"], 256 // 64)
+            case 128:
+                reg_val = fold64(reg_raw["v2_int64"], 128 // 64)
+            case 64:
+                reg_val = int(reg_raw)
+
+            case _:
+                raise gdb.error("Invalid register size")
+        return reg_val
+
+    def show(self, register_prop: RegisterViewProperties) -> None:
+        self.__register_properties = register_prop
+        self.__frame = gdb.newest_frame()
+        print(
+            f"{self.__register_properties['reg_name']} : {self.__fetch_bytes():#0{(self.__register_properties['reg_bits']//4) + 2}x}"
+        )
 
 
 class ExtendedRegisterCommand(GenericCommand):
@@ -202,6 +236,7 @@ class ExtendedRegisterCommand(GenericCommand):
         for arg in argv:
             register_ast = register_ast_visitor.parse_register_notation(arg)
             register_parsed = register_ast_visitor.parse_register_ast(register_ast)
+            register_viewer.show(register_parsed)
 
 
-register(ExtendedRegisterCommand)
+register_external_command(ExtendedRegisterCommand())
