@@ -250,7 +250,7 @@ class RegisterViewer:
         upper = round(self.__register_properties["view_slice"].stop * 8)
         bitmask = ((1 << int(upper)) - 1) ^ ((1 << int(lower)) - 1)
 
-        return bitmask & self.__fetch_bytes()
+        return (bitmask & self.__fetch_bytes()) >> lower
 
     def __chop_bytes(self) -> list[int]:
         lower = round(self.__register_properties["view_slice"].start * 8)
@@ -269,6 +269,15 @@ class RegisterViewer:
     def __apply_format(self) -> str:
         fmt_radix = self.__register_properties["decodetype_radix"]
         fmt_unit = self.__register_properties["decodetype_unit"]
+        if fmt_radix == "c":
+            fmt_unit = int(
+                (
+                    self.__register_properties["view_slice"].stop
+                    - self.__register_properties["view_slice"].start
+                )
+                * 8
+            )
+
         fmt_func = {
             "u": fmt_u,
             "d": fmt_d,
