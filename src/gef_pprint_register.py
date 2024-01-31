@@ -117,7 +117,7 @@ class RegisterNotationASTVisitor(ast.NodeVisitor):
         self.__register_properties["view_slice"] = slice(None, None)
         self.__register_properties["view_endianess"] = Endianess.LITTLE
         self.__register_properties["decodetype_radix"] = "x"
-        self.__register_properties["decodetype_unit"] = 64
+        self.__register_properties["decodetype_unit"] = 0
 
         """
         Do register fetch by visiting AST Nodes.
