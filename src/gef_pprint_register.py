@@ -4,7 +4,9 @@ from typing import Any
 from itertools import product
 from functools import reduce
 from operator import or_
+from math import ceil
 import ast
+import struct
 
 
 class Endianess(Enum):
@@ -20,7 +22,7 @@ class RegisterViewProperties(TypedDict):
     view_endianess: Endianess
 
     decodetype_radix: str
-    decodetype_unit: int | None
+    decodetype_unit: int
 
 
 def get_register_bits(reg: str) -> int:
@@ -46,32 +48,58 @@ def fold64(expand: list[int], ln: int) -> int:
     return reduce(or_, [x << (idx * 64) for idx, x in enumerate(expand)])
 
 
-class RegisterNotationASTVisitor(ast.NodeVisitor):
-    __register_properties: RegisterViewProperties = {
-        "reg_name": str,
-        "reg_bits": int,
-        "view_slice": slice(None, None),
-        "view_endianess": Endianess.LITTLE,
-        "decodetype_radix": "x",
-        "decodetype_unit": 64,
-    }
+fmt_u = lambda x, n: str(x)
+fmt_d = lambda x, n: str(((x & (~(1 << n))) ^ (1 << (n - 1))) - (1 << (n - 1)))
+fmt_b = lambda x, n: f"{x:#0{n+2}b}"
+fmt_o = lambda x, n: f"{x:#0{ceil(n // 3)+2}o}"
+fmt_x = lambda x, n: f"{x:#0{ceil(n // 4)+2}x}"
 
-    def view_fetched(self):
-        """
-        DEBUG PURPOSE.
-        """
-        print(f"REG_NAME = {self.__register_properties['reg_name']}")
-        print(f"REG_BITS = {self.__register_properties['reg_bits']}")
-        print(f"VIE_SLIC = {self.__register_properties['view_slice']}")
-        print(f"VIE_ENDI = {self.__register_properties['view_endianess']}")
-        print(f"DCD_RADX = {self.__register_properties['decodetype_radix']}")
-        print(f"DCD_UNIT = {self.__register_properties['decodetype_unit']}")
+
+def fmt_f(x, n):
+    if n == 32:
+        return str(struct.unpack(">f", struct.pack(">l", x))[0])
+    elif n == 64:
+        return str(struct.unpack(">d", struct.pack(">q", x))[0])
+    else:
+        raise gef.error("Invalid floating point size")
+
+
+def fmt_c(x, n) -> str:
+    string = ""
+    for _ in range(n // 8):
+        ch = x & 0xFF
+        x >>= 8
+        if ch == 0xA:
+            string += chr(0x21B5)
+        elif ch == 0x20:
+            string += chr(0x2423)
+        elif ch == 0x7F:
+            string += chr(0x2421)
+        elif ch & 0x7F < 0x20:
+            if ch > 0x7F:
+                string += "."
+            else:
+                string += chr(0x2400 + ch)
+        else:
+            string += chr(ch)
+
+    return string
+
+
+xmm_register: tuple[str, ...] = tuple(f"$xmm{idx}" for idx in range(32))
+ymm_register: tuple[str, ...] = tuple(f"$ymm{idx}" for idx in range(32))
+zmm_register: tuple[str, ...] = tuple(f"$zmm{idx}" for idx in range(32))
+simd_register: tuple[str, ...] = xmm_register + ymm_register + zmm_register
+
+
+class RegisterNotationASTVisitor(ast.NodeVisitor):
+    __register_properties: RegisterViewProperties = {}
 
     def parse_register_notation(self, regs: str) -> ast.Module:
         """
         Parse string into register notation AST.
         """
-        return ast.parse(regs)
+        return ast.parse(regs.strip("$"))
 
     def parse_register_ast(self, node: ast.Module) -> RegisterViewProperties:
         self.visit_Module(node)
@@ -104,6 +132,9 @@ class RegisterNotationASTVisitor(ast.NodeVisitor):
         """
         register_bits = get_register_bits(self.__register_properties["reg_name"])
         self.__register_properties["reg_bits"] = register_bits
+        self.__register_properties["decodetype_unit"] = (
+            self.__register_properties["decodetype_unit"] or register_bits
+        )
 
         lower = (
             self.__register_properties["view_slice"].start
@@ -146,9 +177,14 @@ class RegisterNotationASTVisitor(ast.NodeVisitor):
         decodetype = self.visit_Name(node.annotation)
         self.__register_properties["decodetype_radix"] = decodetype[0]
         self.__register_properties["decodetype_unit"] = (
-            int(decodetype[1:]) if decodetype[1:] else None
+            int(decodetype[1:]) if decodetype[1:] else 0
         )
-        return self.visit(node.target)
+
+        if isinstance(node.target, ast.Name):
+            self.__register_properties["reg_name"] = self.visit_Name(node.target)
+        elif isinstance(node.target, ast.Subscript):
+            self.visit_Subscript(node.target)
+        return
 
     def visit_Subscript(self, node: ast.Subscript) -> Any:
         """
@@ -209,11 +245,54 @@ class RegisterViewer:
                 raise gdb.error("Invalid register size")
         return reg_val
 
-    def show(self, register_prop: RegisterViewProperties) -> None:
+    def __extract_bytes(self) -> int:
+        lower = round(self.__register_properties["view_slice"].start * 8)
+        upper = round(self.__register_properties["view_slice"].stop * 8)
+        bitmask = ((1 << int(upper)) - 1) ^ ((1 << int(lower)) - 1)
+
+        return bitmask & self.__fetch_bytes()
+
+    def __chop_bytes(self) -> list[int]:
+        lower = round(self.__register_properties["view_slice"].start * 8)
+        upper = round(self.__register_properties["view_slice"].stop * 8)
+
+        fmt_unit = self.__register_properties["decodetype_unit"]
+
+        chopped = []
+        extracted = self.__extract_bytes()
+        for _ in range(ceil((upper - lower) / fmt_unit)):
+            chopped.append(extracted & ((1 << fmt_unit) - 1))
+            extracted >>= fmt_unit
+
+        return chopped
+
+    def __apply_format(self) -> str:
+        fmt_radix = self.__register_properties["decodetype_radix"]
+        fmt_unit = self.__register_properties["decodetype_unit"]
+        fmt_func = {
+            "u": fmt_u,
+            "d": fmt_d,
+            "b": fmt_b,
+            "o": fmt_o,
+            "x": fmt_x,
+            "f": fmt_f,
+            "c": fmt_c,
+        }
+
+        chopped = self.__chop_bytes()
+        chopped = [fmt_func[fmt_radix](item, fmt_unit) for item in chopped]
+
+        if len(chopped) == 1:
+            return chopped[0]
+        else:
+            return "[" + ", ".join(chopped) + "]"
+
+    def show(self, register_prop: RegisterViewProperties, **kwargs) -> None:
         self.__register_properties = register_prop
         self.__frame = gdb.newest_frame()
+        max_width: int = max(map(len, gef.arch.all_registers + zmm_register))
         print(
-            f"{self.__register_properties['reg_name']} : {self.__fetch_bytes():#0{(self.__register_properties['reg_bits']//4) + 2}x}"
+            f"{self.__register_properties['reg_name'].ljust(max_width, ' ')} : {self.__apply_format()}"
         )
 
 
@@ -224,17 +303,20 @@ class ExtendedRegisterCommand(GenericCommand):
     __doc__: str = "Register(including SIMD) formatted pretty-print extension."
 
     @only_if_gdb_running
-    def do_invoke(self, argv):
+    @parse_arguments({"registers": [""]}, {})
+    def do_invoke(self, argv, **kwargs):
         if not isinstance(gef.arch, X86_64):
             raise gdb.error("Only available on X86-64 architecture")
 
-        argv = do_preprocess(argv)[1:]
-
+        args = kwargs["arguments"]
         register_ast_visitor = RegisterNotationASTVisitor()
         register_viewer = RegisterViewer()
 
-        for arg in argv:
-            register_ast = register_ast_visitor.parse_register_notation(arg)
+        if args.registers[0] == "":
+            args.registers = gef.arch.all_registers + zmm_register
+
+        for reg in args.registers:
+            register_ast = register_ast_visitor.parse_register_notation(reg)
             register_parsed = register_ast_visitor.parse_register_ast(register_ast)
             register_viewer.show(register_parsed)
 
