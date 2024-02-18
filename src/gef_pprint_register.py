@@ -245,28 +245,27 @@ class RegisterViewer:
                 raise gdb.error("Invalid register size")
         return reg_val
 
-    def __extract_bytes(self) -> int:
+    def __extract_bytes(self, fetched: int) -> int:
         lower = round(self.__register_properties["view_slice"].start * 8)
         upper = round(self.__register_properties["view_slice"].stop * 8)
         bitmask = ((1 << int(upper)) - 1) ^ ((1 << int(lower)) - 1)
 
-        return (bitmask & self.__fetch_bytes()) >> lower
+        return (bitmask & fetched) >> lower
 
-    def __chop_bytes(self) -> list[int]:
+    def __chop_bytes(self, extracted: int) -> list[int]:
         lower = round(self.__register_properties["view_slice"].start * 8)
         upper = round(self.__register_properties["view_slice"].stop * 8)
 
         fmt_unit = self.__register_properties["decodetype_unit"]
 
         chopped = []
-        extracted = self.__extract_bytes()
         for _ in range(ceil((upper - lower) / fmt_unit)):
             chopped.append(extracted & ((1 << fmt_unit) - 1))
             extracted >>= fmt_unit
 
         return chopped
 
-    def __apply_format(self) -> str:
+    def __apply_format(self, chopped: list[int]) -> str:
         fmt_radix = self.__register_properties["decodetype_radix"]
         fmt_unit = self.__register_properties["decodetype_unit"]
         if fmt_radix == "c":
@@ -288,26 +287,102 @@ class RegisterViewer:
             "c": fmt_c,
         }
 
-        chopped = self.__chop_bytes()
-        chopped = [fmt_func[fmt_radix](item, fmt_unit) for item in chopped]
+        chopped_value = [fmt_func[fmt_radix](item, fmt_unit) for item in chopped]
 
-        if len(chopped) == 1:
-            return chopped[0]
+        if len(chopped_value) == 1:
+            return chopped_value[0]
         else:
-            return "[" + ", ".join(chopped) + "]"
+            return "[" + ", ".join(chopped_value) + "]"
 
-    def show(self, register_prop: RegisterViewProperties, **kwargs) -> None:
+    def show_gp_registrers(
+        self, register_prop: RegisterViewProperties, **kwargs
+    ) -> str:
         self.__register_properties = register_prop
         self.__frame = gdb.newest_frame()
-        max_width: int = max(map(len, gef.arch.all_registers + zmm_register))
-        print(
-            f"{self.__register_properties['reg_name'].ljust(max_width, ' ')} : {self.__apply_format()}"
-        )
+
+        code_color = gef.config["theme.address_code"]
+        stack_color = gef.config["theme.address_stack"]
+        heap_color = gef.config["theme.address_heap"]
+
+        unchanged_color = gef.config["theme.registers_register_name"]
+        changed_color = gef.config["theme.registers_value_changed"]
+
+        string_color = gef.config["theme.dereference_string"]
+
+        max_width: int = max(map(len, gef.arch.all_registers + zmm_register)) + 1
+
+        register_name: str = self.__register_properties["reg_name"]
+
+        register_raw: int = self.__fetch_bytes()
+        register_extracted: int = self.__extract_bytes(register_raw)
+        register_chopped: list[int] = self.__chop_bytes(register_extracted)
+        register_value: str = self.__apply_format(register_chopped)
+
+        if register_raw == ContextCommand.old_registers.get("$" + register_name, 0):
+            color = unchanged_color
+        else:
+            color = changed_color
+
+        line = f"{Color.colorify(('$' + register_name).ljust(max_width, ' '), color)}: "
+
+        addr = lookup_address(align_address(register_extracted))
+        if addr.valid:
+            if addr.is_in_text_segment():
+                line += Color.colorify(register_value, code_color)
+            elif addr.is_in_heap_segment():
+                line += Color.colorify(register_value, heap_color)
+            elif addr.is_in_stack_segment():
+                line += Color.colorify(register_value, stack_color)
+            else:
+                line += register_value
+        else:
+            line += register_value
+
+        addrs = dereference_from(register_raw)
+
+        if len(addrs) > 1:
+            sep = f" {RIGHT_ARROW} "
+            line += sep
+            line += sep.join(addrs[1:])
+
+        return line
+
+    def show_special_registers(
+        self, register_prop: RegisterViewProperties, **kwargs
+    ) -> str:
+        unchanged_color = gef.config["theme.registers_register_name"]
+        changed_color = gef.config["theme.registers_value_changed"]
+
+        register_name: str = self.__register_properties["reg_name"]
+
+        register_raw: int = self.__fetch_bytes()
+        register_extracted: int = self.__extract_bytes(register_raw)
+        register_chopped: list[int] = self.__chop_bytes(register_extracted)
+        register_value: str = self.__apply_format(register_chopped)
+
+        if register_raw == ContextCommand.old_registers.get("$" + register_name, 0):
+            color = unchanged_color
+        else:
+            color = changed_color
+
+        return f"{Color.colorify('$' + register_name, color)}: {gef.arch.register('$' + register_name):#04x} "
+
+    def show_flag_registers(
+        self, register_prop: RegisterViewProperties, **kwargs
+    ) -> str:
+        return gef.arch.flag_register_to_human()
+
+    def show_simd_registers(
+        self, register_prop: RegisterViewProperties, **kwargs
+    ) -> str:
+        pass
 
 
 class ExtendedRegisterCommand(GenericCommand):
     _cmdline_: str = "rezister"
-    _syntax_: str = f"{_cmdline_} {{Register[Beytes]:{{Format}}}} ... {{Register[Bytes]:{{Format}}}}"
+    _syntax_: str = (
+        f"{_cmdline_} {{Register[Beytes]:{{Format}}}} ... {{Register[Bytes]:{{Format}}}}"
+    )
     _example_: str = f"\n{_cmdline_} $rax" f"\n{_cmdline_} $rsp[3:]:u32"
     __doc__: str = "Register(including SIMD) formatted pretty-print extension."
 
@@ -324,10 +399,34 @@ class ExtendedRegisterCommand(GenericCommand):
         if args.registers[0] == "":
             args.registers = gef.arch.all_registers + zmm_register
 
+        gpr_line: str = ""
+        special_line: str = ""
+        flag_line: str = ""
+        simd_line: str = ""
+
         for reg in args.registers:
             register_ast = register_ast_visitor.parse_register_notation(reg)
             register_parsed = register_ast_visitor.parse_register_ast(register_ast)
-            register_viewer.show(register_parsed)
+
+            if "$" + register_parsed["reg_name"] in gef.arch.gpr_registers:
+                gpr_line += register_viewer.show_gp_registrers(register_parsed) + "\n"
+            elif "$" + register_parsed["reg_name"] in gef.arch.special_registers:
+                special_line += (
+                    register_viewer.show_special_registers(register_parsed) + " "
+                )
+            elif "$" + register_parsed["reg_name"] == gef.arch.flag_register:
+                flag_line = register_viewer.show_flag_registers(register_parsed) + " "
+            elif "$" + register_parsed["reg_name"] in simd_register:
+                pass
+
+        if gpr_line:
+            gef_print(gpr_line, end="")
+        if special_line:
+            gef_print(special_line)
+        if flag_line:
+            gef_print(flag_line)
+        if simd_line:
+            gef_print(simd_line)
 
 
 register_external_command(ExtendedRegisterCommand())
