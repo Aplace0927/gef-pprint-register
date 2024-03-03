@@ -226,9 +226,9 @@ class RegisterViewer:
     __register_properties: RegisterViewProperties
     __frame: gdb.Frame
 
-    def __fetch_bytes(self):
-        reg_name = self.__register_properties["reg_name"]
-        reg_bits = self.__register_properties["reg_bits"]
+    def __fetch_bytes(self, register_prop: RegisterViewProperties):
+        reg_name = register_prop["reg_name"]
+        reg_bits = register_prop["reg_bits"]
         reg_raw = self.__frame.read_register(reg_name)
         reg_val: int
         match reg_bits:
@@ -245,18 +245,22 @@ class RegisterViewer:
                 raise gdb.error("Invalid register size")
         return reg_val
 
-    def __extract_bytes(self, fetched: int) -> int:
-        lower = round(self.__register_properties["view_slice"].start * 8)
-        upper = round(self.__register_properties["view_slice"].stop * 8)
+    def __extract_bytes(
+        self, register_prop: RegisterViewProperties, fetched: int
+    ) -> int:
+        lower = round(register_prop["view_slice"].start * 8)
+        upper = round(register_prop["view_slice"].stop * 8)
         bitmask = ((1 << int(upper)) - 1) ^ ((1 << int(lower)) - 1)
 
         return (bitmask & fetched) >> lower
 
-    def __chop_bytes(self, extracted: int) -> list[int]:
-        lower = round(self.__register_properties["view_slice"].start * 8)
-        upper = round(self.__register_properties["view_slice"].stop * 8)
+    def __chop_bytes(
+        self, register_prop: RegisterViewProperties, extracted: int
+    ) -> list[int]:
+        lower = round(register_prop["view_slice"].start * 8)
+        upper = round(register_prop["view_slice"].stop * 8)
 
-        fmt_unit = self.__register_properties["decodetype_unit"]
+        fmt_unit = register_prop["decodetype_unit"]
 
         chopped = []
         for _ in range(ceil((upper - lower) / fmt_unit)):
@@ -265,15 +269,14 @@ class RegisterViewer:
 
         return chopped
 
-    def __apply_format(self, chopped: list[int]) -> str:
-        fmt_radix = self.__register_properties["decodetype_radix"]
-        fmt_unit = self.__register_properties["decodetype_unit"]
+    def __apply_format(
+        self, register_prop: RegisterViewProperties, chopped: list[int]
+    ) -> str:
+        fmt_radix = register_prop["decodetype_radix"]
+        fmt_unit = register_prop["decodetype_unit"]
         if fmt_radix == "c":
             fmt_unit = int(
-                (
-                    self.__register_properties["view_slice"].stop
-                    - self.__register_properties["view_slice"].start
-                )
+                (register_prop["view_slice"].stop - register_prop["view_slice"].start)
                 * 8
             )
 
@@ -294,10 +297,7 @@ class RegisterViewer:
         else:
             return "[" + ", ".join(chopped_value) + "]"
 
-    def show_gp_registrers(
-        self, register_prop: RegisterViewProperties, **kwargs
-    ) -> str:
-        self.__register_properties = register_prop
+    def show_gp_registers(self, register_prop: RegisterViewProperties, **kwargs) -> str:
         self.__frame = gdb.newest_frame()
 
         code_color = gef.config["theme.address_code"]
@@ -309,14 +309,16 @@ class RegisterViewer:
 
         string_color = gef.config["theme.dereference_string"]
 
-        max_width: int = max(map(len, gef.arch.all_registers + zmm_register)) + 1
+        max_width: int = max(map(len, gef.arch.all_registers)) + 1
 
-        register_name: str = self.__register_properties["reg_name"]
+        register_name: str = register_prop["reg_name"]
 
-        register_raw: int = self.__fetch_bytes()
-        register_extracted: int = self.__extract_bytes(register_raw)
-        register_chopped: list[int] = self.__chop_bytes(register_extracted)
-        register_value: str = self.__apply_format(register_chopped)
+        register_raw: int = self.__fetch_bytes(register_prop)
+        register_extracted: int = self.__extract_bytes(register_prop, register_raw)
+        register_chopped: list[int] = self.__chop_bytes(
+            register_prop, register_extracted
+        )
+        register_value: str = self.__apply_format(register_prop, register_chopped)
 
         if register_raw == ContextCommand.old_registers.get("$" + register_name, 0):
             color = unchanged_color
@@ -350,15 +352,19 @@ class RegisterViewer:
     def show_special_registers(
         self, register_prop: RegisterViewProperties, **kwargs
     ) -> str:
+        self.__frame = gdb.newest_frame()
+
         unchanged_color = gef.config["theme.registers_register_name"]
         changed_color = gef.config["theme.registers_value_changed"]
 
-        register_name: str = self.__register_properties["reg_name"]
+        register_name: str = register_prop["reg_name"]
 
-        register_raw: int = self.__fetch_bytes()
-        register_extracted: int = self.__extract_bytes(register_raw)
-        register_chopped: list[int] = self.__chop_bytes(register_extracted)
-        register_value: str = self.__apply_format(register_chopped)
+        register_raw: int = self.__fetch_bytes(register_prop)
+        register_extracted: int = self.__extract_bytes(register_prop, register_raw)
+        register_chopped: list[int] = self.__chop_bytes(
+            register_prop, register_extracted
+        )
+        register_value: str = self.__apply_format(register_prop, register_chopped)
 
         if register_raw == ContextCommand.old_registers.get("$" + register_name, 0):
             color = unchanged_color
@@ -370,12 +376,38 @@ class RegisterViewer:
     def show_flag_registers(
         self, register_prop: RegisterViewProperties, **kwargs
     ) -> str:
+        self.__frame = gdb.newest_frame()
         return gef.arch.flag_register_to_human()
 
     def show_simd_registers(
         self, register_prop: RegisterViewProperties, **kwargs
     ) -> str:
-        pass
+        self.__frame = gdb.newest_frame()
+
+        unchanged_color = gef.config["theme.registers_register_name"]
+        changed_color = gef.config["theme.registers_value_changed"]
+
+        string_color = gef.config["theme.dereference_string"]
+
+        max_width: int = max(map(len, gef.arch.all_registers + simd_register)) + 1
+
+        register_name: str = register_prop["reg_name"]
+
+        register_raw: int = self.__fetch_bytes(register_prop)
+        register_extracted: int = self.__extract_bytes(register_prop, register_raw)
+        register_chopped: list[int] = self.__chop_bytes(
+            register_prop, register_extracted
+        )
+        register_value: str = self.__apply_format(register_prop, register_chopped)
+
+        if register_raw == ContextCommand.old_registers.get("$" + register_name, 0):
+            color = unchanged_color
+        else:
+            color = changed_color
+
+        line = f"{Color.colorify(('$' + register_name).ljust(max_width, ' '), color)}: "
+        line += Color.colorify(register_value, string_color)
+        return line
 
 
 class ExtendedRegisterCommand(GenericCommand):
@@ -409,15 +441,15 @@ class ExtendedRegisterCommand(GenericCommand):
             register_parsed = register_ast_visitor.parse_register_ast(register_ast)
 
             if "$" + register_parsed["reg_name"] in gef.arch.gpr_registers:
-                gpr_line += register_viewer.show_gp_registrers(register_parsed) + "\n"
+                gpr_line += register_viewer.show_gp_registers(register_parsed) + "\n"
             elif "$" + register_parsed["reg_name"] in gef.arch.special_registers:
                 special_line += (
                     register_viewer.show_special_registers(register_parsed) + " "
                 )
             elif "$" + register_parsed["reg_name"] == gef.arch.flag_register:
-                flag_line = register_viewer.show_flag_registers(register_parsed) + " "
+                flag_line += register_viewer.show_flag_registers(register_parsed) + " "
             elif "$" + register_parsed["reg_name"] in simd_register:
-                pass
+                simd_line += register_viewer.show_simd_registers(register_parsed) + "\n"
 
         if gpr_line:
             gef_print(gpr_line, end="")
