@@ -88,32 +88,48 @@ class RegisterNotationASTVisitor(ast.NodeVisitor):
             reg_property, reg_notation = self.visit_AnnAssign(node.body[0])
             return RegisterDump(reg_property, reg_notation)
         else:
-            raise TypeError
+            raise TypeError("Unknown format of register notation")
 
     def visit_Expr(self, node: ast.Expr) -> PropertyInfo:
         if isinstance(node.value, ast.Name):
             reg_name = self.visit_Name(node.value)
-            return PropertyInfo(reg_name, SliceInfo())
+            return PropertyInfo(reg_name, SliceInfo(SliceInfo.SliceRange.FROM_MSB, SliceInfo.SliceRange.TO_LSB))
         elif isinstance(node.value, ast.Subscript):
             reg_name, reg_slice = self.visit_Subscript(node.value)
             return PropertyInfo(reg_name, reg_slice)
         else:
-            raise TypeError
+            raise TypeError("Unknown format of register property")
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> tuple[PropertyInfo, NotationInfo]:
         if isinstance(node.target, ast.Name):
             reg_name = self.visit_Name(node.target)
+            
+            if not isinstance(node.annotation, ast.Name):
+                raise TypeError("Regiset annotation must be string constant")
+
             radix, unit = NotationInfo.decode(self.visit_Name(node.annotation))
-            return PropertyInfo(reg_name, SliceInfo()), NotationInfo(radix, unit)
+            return PropertyInfo(reg_name, SliceInfo(SliceInfo.SliceRange.FROM_MSB, SliceInfo.SliceRange.TO_LSB)), NotationInfo(radix, unit)
+
         elif isinstance(node.target, ast.Subscript):
             reg_name, reg_slice = self.visit_Subscript(node.target)
+
+            if not isinstance(node.annotation, ast.Name):
+                raise TypeError("Register annotation must be string constant")
+
             radix, unit = NotationInfo.decode(self.visit_Name(node.annotation))
             return PropertyInfo(reg_name, reg_slice), NotationInfo(radix, unit)
         else:
-            raise TypeError
+            raise TypeError("Unknown format of register property with notation")
 
     def visit_Subscript(self, node: ast.Subscript) -> tuple[str, SliceInfo]:
+        if not isinstance(node.value, ast.Name):
+            raise TypeError("Register name must be string constant")
+
         reg_name = self.visit_Name(node.value)
+
+        if not isinstance(node.slice, ast.Slice):
+            raise TypeError("Register must be sliced")
+
         slice_from, slice_to = self.visit_Slice(node.slice)
         return reg_name, SliceInfo(slice_from, slice_to)
 
